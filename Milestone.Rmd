@@ -1,0 +1,265 @@
+---
+title: "Milestone Report"
+author: "Paul Y. Ke"
+date: "6/16/2018"
+output: html_document
+---
+
+
+
+## Executive Summary
+This is a Milestone Report for the John Hopkins Data Science Capstone program that will
+describe the major features of the data identified and will summarize plans for creating the prediction algorithm and Shiny app.
+
+The dataset Data for the project is: <a href="https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip">Coursera Swiftkey Dataset.</a>  
+is specific to Coursera and contains 3 files (blogs, news, and twitter) in 4 different languages.  For purposes of this exercise, we will focus on just US English.
+
+The full R code for the report can be found <a href="http://github.com/paulke1039/milestone/">here</a> on GitHub, this report owill only show critical transformations to demonstrate the processing performed.
+
+## Library setup and import
+This project uses tidytext to perform the text processing and will process the lines and split the line into one word per row of a table.  The result is 4.2M lines of text with 102M words that results in 855MB of memory.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(tidytext)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+setwd("/Users/paulke/Projects/R/Capstone/Milestone/")
+set.seed(1039)
+```
+```{r, echo=FALSE}
+con <- file("final/en_US/en_US.twitter.txt", open="r")
+twitter.filesize <- round(file.size("final/en_US/en_US.twitter.txt")/1024^2, digits=2)
+lines <-  readLines(con, encoding = 'UTF-8', skipNul = TRUE)
+twitter.num_lines <- length(lines)
+close(con)
+rm(con)
+twitter_df <- data_frame(line=1:length(lines), text=lines)
+twitter_tidy <- twitter_df %>% 
+  unnest_tokens(word, text)
+twitter.word_count <- nrow(twitter_tidy)
+
+con <- file("final/en_US/en_US.news.txt", open="r")
+news.filesize <- round(file.size("final/en_US/en_US.news.txt")/1024^2, digits=2)
+lines <-  readLines(con, encoding = 'UTF-8', skipNul = TRUE)
+news.num_lines <- length(lines)
+close(con)
+rm(con)
+news_df <-data_frame(line=1:length(lines), text=lines)
+news_tidy <- news_df %>% 
+  unnest_tokens(word, text)
+news.word_count <- nrow(news_tidy)
+
+con <- file("final/en_US/en_US.blogs.txt", open="r")
+blogs.filesize <- round(file.size("final/en_US/en_US.blogs.txt")/1024^2, digits=2)
+lines <-  readLines(con, encoding = 'UTF-8', skipNul = TRUE)
+blogs.num_lines <- length(lines)
+close(con)
+rm(con)
+blogs_df <-data_frame(line=1:length(lines), text=lines)
+blogs_tidy <- blogs_df %>% 
+  unnest_tokens(word, text)
+blogs.word_count <- nrow(blogs_tidy)
+
+con <- file("badwords.txt", open="r")
+lines <-  readLines(con, skipNul = TRUE)
+close(con)
+rm(con)
+bad_words <- data_frame(word=lines)
+
+
+```
+## Datafile metrics
+Analysis of the datafiles will help us determine what we have to work with start to establish a design approach for the application and algorithm.
+
+```{r, echo=TRUE}
+
+data_summary <- data.frame(feed = c("Twitter", "News", "Blogs"), 
+                           filesize_MB = c(twitter.filesize, news.filesize, blogs.filesize),
+                           num_lines = c(twitter.num_lines, news.num_lines, blogs.num_lines),
+                           word_count=c(twitter.word_count, news.word_count, blogs.word_count)
+                           )
+data_summary
+
+```
+
+## Data cleaning and processing
+Next, the data is sanitized by removing stop_words from the tm package from each dataset.
+There are over 1000 words (1149) which are words that are common and not usefuly for purposes of our analysis.  We will also remove a list of "bad words" as identified by Google via this URL:
+https://storage.googleapis.com/google-code-archive-downloads/v2/code.google.com/badwordslist/badwords.txt
+
+Processing of the data per feed by determining:<br>
+1. We start by taking a random sample of 150,000 lines of text.  This is roughly 3.5% of the total number of lines and will allow us to quickly process the text in a reasonable amount of time.<br>
+2. The count of words per feed.<br>
+3. Calculating the total number of words from the feed.<br>
+4. Determine the Term Frequency (tf) by calculating the number of words by the total number of words.<br>
+5. Process the inverse document frequency (idf)<br>
+6. Use tf-idf to measure how important the term is to a corpus.  In this case, within the collection of feeds.<br>
+
+```{r, echo=TRUE, message=FALSE}
+twitter_tidy <- twitter_tidy %>%  mutate(word = str_extract(word, "[a-z']+")) %>% anti_join(stop_words) %>% anti_join(bad_words)
+news_tidy <- news_tidy %>% mutate(word = str_extract(word, "[a-z']+")) %>% anti_join(stop_words) %>% anti_join(bad_words)
+blogs_tidy <- blogs_tidy %>% mutate(word = str_extract(word, "[a-z']+")) %>% anti_join(stop_words) %>% anti_join(bad_words)
+
+twitter_sample <- twitter_tidy[sample(nrow(twitter_tidy), 150000),]
+news_sample <- news_tidy[sample(nrow(news_tidy), 150000),]
+blogs_sample <- blogs_tidy[sample(nrow(blogs_tidy), 150000),]
+
+feed_tidy <- bind_rows(mutate(twitter_sample, feed = "Twitter"),
+                       mutate(news_sample, feed = "News"),
+                       mutate(blogs_sample, feed = "Blogs"))
+
+# Get the count of words per feed, sorted
+feed_words <- feed_tidy %>%
+  count(feed, word, sort = TRUE) %>%
+  ungroup()
+
+# Get the count of words for each feed
+total_words <- feed_words %>%
+  group_by(feed) %>%
+  summarize(total = sum(n))
+
+# add the total words from the feed
+feed_words <- left_join(feed_words, total_words) 
+
+freq_by_rank <- feed_words %>%
+  group_by(feed) %>% 
+  mutate(rank = row_number(), 'term frequency' = n/total)
+
+feed_words <- feed_words %>% 
+  bind_tf_idf(feed, word, n)
+
+feed_ordered <- feed_words %>% 
+  select(-total, -NA) %>%
+  arrange(desc(tf_idf)) %>%
+  mutate(word = factor(word, levels = rev(unique(word)))) %>%
+  group_by(feed) %>%
+  top_n(15,tf_idf + n) %>%
+  ungroup
+
+  ggplot(data = na.omit(feed_ordered), aes(word, tf_idf, fill = feed)) +
+  geom_col(show.legend = FALSE) + 
+  labs(x = NULL, y = "tf-idf") + 
+  facet_wrap(~feed, ncol = 2, scales = "free") + 
+  coord_flip()
+```
+
+##Bigrams and Trigrams
+Process the datasets using a similar process with bigrams and trigrams.
+
+```{r, echo=FALSE, message=FALSE}  
+  #n-grams
+twitter_bigrams <- twitter_df %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 2)
+blogs_bigrams <- blogs_df %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 2)
+news_bigrams <- news_df %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 2)
+
+twitter_bigrams_sample = twitter_bigrams[sample(nrow(twitter_bigrams), 150000),]
+blogs_bigrams_sample = blogs_bigrams[sample(nrow(blogs_bigrams), 150000),]
+news_bigrams_sample = news_bigrams[sample(nrow(news_bigrams), 150000),]
+feed_bigrams <- bind_rows(mutate(twitter_bigrams_sample, feed = "Twitter"),
+                          mutate(news_bigrams_sample, feed = "News"),
+                          mutate(blogs_bigrams_sample, feed = "Blogs"))
+# get rid of common terms
+feed_bigrams_separated <- feed_bigrams %>%
+  separate(bigram, c("word1", "word2"), sep = " ")
+feed_bigrams_filtered <- feed_bigrams_separated %>%
+  mutate(word1 = str_extract(word1, "[a-z']+")) %>% 
+  anti_join(stop_words, by= c("word1" = "word")) %>% anti_join(bad_words, by = c("word1" = "word")) %>%
+  mutate(word2 = str_extract(word2, "[a-z']+")) %>% 
+  anti_join(stop_words, by= c("word2" = "word")) %>% anti_join(bad_words, by = c("word2" = "word"))
+
+feed_bigrams_filtered <- feed_bigrams_filtered[complete.cases(feed_bigrams_filtered),]
+
+#new bigram counts:
+feed_bigram_counts <- feed_bigrams_filtered %>%
+  count(word1, word2, sort = TRUE)
+
+#recombine the words
+feed_bigrams_united <- feed_bigrams_filtered %>%
+  unite(bigram, word1, word2, sep = " ")
+
+feed_bigram_tf_idf <- feed_bigrams_united %>%
+  count(feed, bigram) %>%
+  bind_tf_idf(bigram, feed, n) %>%
+  arrange(desc(tf_idf))
+
+feed_bigram_mutated <- feed_bigram_tf_idf %>%
+  arrange(desc(tf_idf)) %>%
+  mutate(bigram = factor(bigram, levels = rev(unique(bigram)))) %>%
+  group_by(feed) %>% 
+  top_n(5, tf_idf + n) %>%
+  ungroup
+```
+
+```{r, echo=TRUE, message=FALSE}
+ggplot(data=na.omit(feed_bigram_mutated), aes(bigram, tf_idf, fill = feed)) + 
+  geom_col(show.legend = FALSE) + 
+  labs(x = NULL, y = "tf-idf") + 
+  facet_wrap(~feed, ncol = 2, scales = "free") + 
+  coord_flip()
+```
+
+```{r, echo=FALSE, message=FALSE}  
+## Trigrams
+twitter_trigrams <- twitter_df %>%
+  unnest_tokens(trigram, text, token = "ngrams", n = 3)
+blogs_trigrams <- blogs_df %>%
+  unnest_tokens(trigram, text, token = "ngrams", n = 3)
+news_trigrams <- news_df %>%
+  unnest_tokens(trigram, text, token = "ngrams", n = 3)
+
+twitter_trigrams_sample = twitter_trigrams[sample(nrow(twitter_trigrams), 150000),]
+blogs_trigrams_sample = blogs_trigrams[sample(nrow(blogs_trigrams), 150000),]
+news_trigrams_sample = news_trigrams[sample(nrow(news_trigrams), 150000),]
+feed_trigrams <- bind_rows(mutate(twitter_trigrams_sample, feed = "Twitter"),
+                          mutate(news_trigrams_sample, feed = "News"),
+                          mutate(blogs_trigrams_sample, feed = "Blogs"))
+# get rid of common terms
+feed_trigrams_separated <- feed_trigrams %>%
+  separate(trigram, c("word1", "word2", "word3"), sep = " ")
+
+feed_trigrams_filtered <- feed_trigrams_separated %>%
+  mutate(word1 = str_extract(word1, "[a-z']+")) %>% 
+  anti_join(stop_words, by= c("word1" = "word")) %>% anti_join(bad_words, by = c("word1" = "word")) %>%
+  mutate(word2 = str_extract(word2, "[a-z']+")) %>% 
+  anti_join(stop_words, by= c("word2" = "word")) %>% anti_join(bad_words, by = c("word2" = "word")) %>%
+  mutate(word3 = str_extract(word3, "[a-z']+")) %>% 
+  anti_join(stop_words, by= c("word3" = "word")) %>% anti_join(bad_words, by = c("word3" = "word"))
+
+feed_trigrams_filtered <- feed_trigrams_filtered[complete.cases(feed_trigrams_filtered),]
+
+feed_trigram_counts <- feed_trigrams_filtered %>%
+  count(word1, word2, word3, sort = TRUE)
+
+#recombine the words
+feed_trigrams_united <- feed_trigrams_filtered %>%
+  unite(trigram, word1, word2, word3, sep = " ")
+
+feed_trigram_tf_idf <- feed_trigrams_united %>%
+  count(feed, trigram) %>%
+  bind_tf_idf(trigram, feed, n) %>%
+  arrange(desc(tf_idf))
+
+feed_trigram_mutated <- feed_trigram_tf_idf %>%
+  arrange(desc(tf_idf)) %>%
+  mutate(trigram = factor(trigram, levels = rev(unique(trigram)))) %>%
+  group_by(feed) %>% 
+  top_n(5, tf_idf) %>%
+  ungroup
+```
+
+```{r, echo=TRUE, message=FALSE}
+ggplot(data=na.omit(feed_trigram_mutated), aes(trigram, tf_idf, fill = feed)) + 
+  geom_col(show.legend = FALSE) + 
+  labs(x = NULL, y = "tf-idf") + 
+  facet_wrap(~feed, ncol = 2, scales = "free") + 
+  coord_flip()
+```
+
+##Product Approach and Design
+The project of a predictive text application can be built by using the trigrams (or quad- or penta- grams depending on processing speed) to predict the next word.  As the user enters a word, a list of predictions can be returned based on the dataset.
